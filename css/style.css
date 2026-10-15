@@ -1,4 +1,5 @@
 :root {
+  color-scheme: dark;
   --bg: #121317;
   --panel: #1a1c21;
   --card: #20232a;
@@ -105,6 +106,19 @@ select { width: 100%; background: var(--panel); color: var(--text); border: 1px 
   .panel { width: 210px; }
   .toolbar { width: 58px; }
   .tool span { display: none; }
+}
+/* Phones: tools in a scrolling row on top, canvas, settings underneath. */
+@media (max-width: 600px) {
+  .app { flex-direction: column; }
+  .toolbar { width: auto; flex-direction: row; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid var(--line);
+    padding: 4px max(8px, env(safe-area-inset-left, 0px)); flex: none; }
+  .tool-group { flex-direction: row; }
+  .tool { min-width: 40px; }
+  .tool-sep { width: 1px; height: auto; margin: 4px 4px; }
+  .stage { flex: 1 1 50%; min-height: 0; }
+  .panel { width: auto; flex: 0 1 40%; border-left: 0; border-top: 1px solid var(--line);
+    padding-left: max(10px, env(safe-area-inset-left, 0px)); padding-right: max(10px, env(safe-area-inset-right, 0px)); }
+  .status { gap: 10px; font-size: 12px; }
 }
 input[type=color]::-webkit-color-swatch-wrapper { padding: 0; }
 input[type=color]::-webkit-color-swatch { border: 0; border-radius: 4px; }

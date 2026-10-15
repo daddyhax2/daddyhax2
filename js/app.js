@@ -39,7 +39,7 @@
   let quality = 1; // adaptive resolution factor (drops on slow devices)
 
   function layoutCanvas() {
-    const pad = 28;
+    const pad = Math.min(28, Math.max(8, stage.clientWidth * 0.04));
     const r = stage.getBoundingClientRect();
     viewScale = Math.min((r.width - pad * 2) / state.width, (r.height - pad * 2) / state.height);
     viewScale = Math.max(0.05, viewScale);
@@ -565,15 +565,24 @@
     layoutCanvas(); renderLayers(); updateStatus();
   }
 
-  function download(blob, name) {
+  /* Save a file. Inside a claude.ai artifact the frame blocks direct
+   * downloads, so use the viewer's `downloads` capability when present. */
+  const hostDownloads = window.claude && window.claude.use ? window.claude.use('downloads').catch(() => null) : Promise.resolve(null);
+  async function download(blob, name, doneMsg) {
+    const dl = await hostDownloads;
+    if (dl) {
+      try { await dl.save({ filename: name, data: blob }); if (doneMsg) toast(doneMsg); }
+      catch (err) { toast(err && err.code === 'declined' ? 'Save cancelled' : 'Could not save: ' + ((err && err.message) || 'unavailable')); }
+      return;
+    }
+    if (doneMsg) toast(doneMsg);
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
   }
   function saveProject() {
-    download(new Blob([JSON.stringify(serialize())], { type: 'application/json' }), 'drawimate-project.json');
-    toast('Project saved');
+    download(new Blob([JSON.stringify(serialize())], { type: 'application/json' }), 'drawimate-project.json', 'Project saved');
   }
   function loadProjectFile(file) {
     file.text().then((txt) => { deserialize(JSON.parse(txt)); toast('Project loaded'); })
@@ -704,8 +713,7 @@
     const cancelled = job.cancelled;
     endExport();
     if (cancelled) { toast('Export cancelled'); return; }
-    download(new Blob(chunks, { type: 'video/webm' }), `drawimate-loop-${L}s.webm`);
-    toast('WebM exported');
+    download(new Blob(chunks, { type: 'video/webm' }), `drawimate-loop-${L}s.webm`, 'WebM exported');
   }
 
   async function exportZip() {
@@ -730,8 +738,7 @@
     const cancelled = job.cancelled;
     endExport();
     if (cancelled) { toast('Export cancelled'); return; }
-    download(zip.finish(), `drawimate-frames-${L}s-${fps}fps.zip`);
-    toast(`${total} PNG frames exported`);
+    download(zip.finish(), `drawimate-frames-${L}s-${fps}fps.zip`, `${total} PNG frames exported`);
   }
   $('btnWebm').addEventListener('click', exportWebm);
   $('btnZip').addEventListener('click', exportZip);
