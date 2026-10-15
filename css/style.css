@@ -109,3 +109,5 @@ select { width: 100%; background: var(--panel); color: var(--text); border: 1px 
 input[type=color]::-webkit-color-swatch-wrapper { padding: 0; }
 input[type=color]::-webkit-color-swatch { border: 0; border-radius: 4px; }
 input[type=color]::-moz-color-swatch { border: 0; border-radius: 4px; }
+.layer input.rename { flex: 1; min-width: 0; background: var(--panel); color: var(--text); border: 1px solid var(--accent); border-radius: 4px; padding: 1px 4px; font: inherit; }
+.icon-btns button:disabled { opacity: .35; cursor: default; }

@@ -211,13 +211,112 @@
   }
 
   /* ---------------------------------------------------------------- eraser */
+  // Removes whole strokes on the active layer that come within reach.
   let erasing = null;
-  function eraserStart() {}
-  function eraserMove() {}
-  function eraserEnd() {}
+
+  function strokeBounds(st) {
+    if (st._bbN === st.points.length) return st._bb;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of st.points) { if (p.x < x0) x0 = p.x; if (p.x > x1) x1 = p.x; if (p.y < y0) y0 = p.y; if (p.y > y1) y1 = p.y; }
+    st._bb = [x0, y0, x1, y1]; st._bbN = st.points.length;
+    return st._bb;
+  }
+  function segDist2(px, py, ax, ay, bx, by) {
+    const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+    let t = l2 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const ex = ax + t * dx - px, ey = ay + t * dy - py;
+    return ex * ex + ey * ey;
+  }
+  function hitStroke(st, x, y, r) {
+    const reach = r + st.size * 0.6 + st.amp * 0.5;
+    const bb = strokeBounds(st);
+    if (x < bb[0] - reach || x > bb[2] + reach || y < bb[1] - reach || y > bb[3] + reach) return false;
+    const pts = st.points, r2 = reach * reach;
+    if (pts.length === 1) return (pts[0].x - x) ** 2 + (pts[0].y - y) ** 2 <= r2;
+    for (let i = 1; i < pts.length; i++) {
+      if (segDist2(x, y, pts[i - 1].x, pts[i - 1].y, pts[i].x, pts[i].y) <= r2) return true;
+    }
+    return false;
+  }
+  function eraseAt(pt) {
+    const layer = activeLayer();
+    const before = layer.strokes.length;
+    layer.strokes = layer.strokes.filter((st) => !hitStroke(st, pt.x, pt.y, state.eraserSize));
+    if (layer.strokes.length !== before) { erasing.removed += before - layer.strokes.length; dirty = true; updateStatus(); }
+  }
+  function eraserStart(e, pt) {
+    const layer = activeLayer();
+    if (!layer || layer.type !== 'draw') { toast('Select a drawing layer to erase'); return; }
+    erasing = { pointerId: e.pointerId, snap: snapshot(), removed: 0, last: pt };
+    eraseAt(pt);
+  }
+  function eraserMove(e) {
+    const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    for (const ev of (evs.length ? evs : [e])) {
+      const pt = toArtboard(ev), last = erasing.last;
+      // sample the drag segment so fast swipes don't skip thin strokes
+      const steps = Math.max(1, Math.ceil(Math.hypot(pt.x - last.x, pt.y - last.y) / (state.eraserSize * 0.5)));
+      for (let k = 1; k <= steps; k++) eraseAt({ x: last.x + (pt.x - last.x) * k / steps, y: last.y + (pt.y - last.y) * k / steps });
+      erasing.last = pt;
+    }
+  }
+  function eraserEnd() {
+    if (erasing.removed) { pushUndo(erasing.snap); renderLayers(); }
+    erasing = null;
+  }
 
   /* ---------------------------------------------------------------- history */
-  function beforeChange() {}
+  // Strokes are immutable once finished, so a snapshot only needs to copy
+  // the layer list and each layer's stroke array (not the points).
+  const undoStack = [], redoStack = [];
+  const HISTORY_LIMIT = 300;
+
+  function snapshot() {
+    return {
+      layers: state.layers.map((l) => Object.assign({}, l, { strokes: l.strokes.slice() })),
+      activeLayerId: state.activeLayerId,
+    };
+  }
+  function restore(snap) {
+    state.layers = snap.layers.map((l) => Object.assign({}, l, { strokes: l.strokes.slice() }));
+    state.activeLayerId = snap.activeLayerId;
+    if (!activeLayer()) state.activeLayerId = state.layers[state.layers.length - 1].id;
+    dirty = true;
+    renderLayers(); updateStatus();
+  }
+  function pushUndo(snap) {
+    undoStack.push(snap);
+    if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
+    redoStack.length = 0;
+    syncHistoryButtons();
+  }
+  function beforeChange() { pushUndo(snapshot()); }
+  function undo() {
+    if (drawing || erasing || !undoStack.length) return;
+    redoStack.push(snapshot()); restore(undoStack.pop()); syncHistoryButtons();
+  }
+  function redo() {
+    if (drawing || erasing || !redoStack.length) return;
+    undoStack.push(snapshot()); restore(redoStack.pop()); syncHistoryButtons();
+  }
+  function resetHistory() { undoStack.length = 0; redoStack.length = 0; syncHistoryButtons(); }
+  function syncHistoryButtons() {
+    $('btnUndo').disabled = !undoStack.length;
+    $('btnRedo').disabled = !redoStack.length;
+  }
+  $('btnUndo').addEventListener('click', undo);
+  $('btnRedo').addEventListener('click', redo);
+
+  $('btnClear').addEventListener('click', () => {
+    const layer = activeLayer();
+    if (!layer || layer.type !== 'draw') { toast('Select a drawing layer to clear'); return; }
+    if (!layer.strokes.length) return;
+    beforeChange();
+    layer.strokes = [];
+    dirty = true; renderLayers(); updateStatus();
+    toast('Layer cleared — Ctrl+Z to undo');
+  });
 
   /* -------------------------------------------------------------- brush UI */
   const ctl = {
@@ -271,7 +370,231 @@
   });
 
   /* ---------------------------------------------------------------- layers */
-  function renderLayers() {}
+  const layerList = $('layerList');
+
+  function renderLayers() {
+    layerList.textContent = '';
+    // Top of the list = top of the stack.
+    for (let i = state.layers.length - 1; i >= 0; i--) {
+      const l = state.layers[i];
+      const li = document.createElement('li');
+      li.className = 'layer' + (l.visible ? '' : ' hidden-layer');
+      li.dataset.id = l.id;
+      const eye = document.createElement('button');
+      eye.className = 'eye'; eye.title = l.visible ? 'Hide layer' : 'Show layer';
+      eye.textContent = l.visible ? '◉' : '○';
+      eye.addEventListener('click', (e) => {
+        e.stopPropagation();
+        beforeChange();
+        findLayer(l.id).visible = !l.visible;
+        dirty = true; renderLayers();
+      });
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = (l.type === 'image' ? '🖼 ' : '') + l.name;
+      name.title = 'Double-click to rename';
+      const count = document.createElement('span');
+      count.className = 'count';
+      count.textContent = l.type === 'image' ? 'image' : l.strokes.length;
+      li.append(eye, name, count);
+      li.addEventListener('click', () => { state.activeLayerId = l.id; syncActiveLayer(); });
+      layerList.appendChild(li);
+    }
+    syncActiveLayer();
+  }
+  function syncActiveLayer() {
+    for (const li of layerList.children) li.classList.toggle('active', +li.dataset.id === state.activeLayerId);
+    const idx = state.layers.findIndex((l) => l.id === state.activeLayerId);
+    $('btnLayerUp').disabled = idx >= state.layers.length - 1;
+    $('btnLayerDown').disabled = idx <= 0;
+    $('btnLayerDel').disabled = state.layers.length <= 1;
+  }
+  const findLayer = (id) => state.layers.find((l) => l.id === id);
+  // Delegated: the first click of a double-click re-renders the rows.
+  layerList.addEventListener('dblclick', (e) => {
+    const li = e.target.closest('li');
+    if (li && e.target.closest('.name')) startRename(li, +li.dataset.id);
+  });
+
+  function startRename(li, id) {
+    const layer = findLayer(id);
+    const input = document.createElement('input');
+    input.value = layer.name; input.className = 'rename';
+    const nameEl = li.querySelector('.name');
+    nameEl.replaceWith(input);
+    input.focus(); input.select();
+    let done = false;
+    const finish = (commit) => {
+      if (done) return; done = true;
+      const v = input.value.trim();
+      if (commit && v && v !== layer.name) { beforeChange(); findLayer(id).name = v.slice(0, 40); }
+      renderLayers();
+    };
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') finish(true); if (e.key === 'Escape') finish(false); e.stopPropagation(); });
+    input.addEventListener('blur', () => finish(true));
+  }
+
+  let layerCounter = 1;
+  function addLayer() {
+    beforeChange();
+    const l = makeLayer('Layer ' + (++layerCounter));
+    const idx = state.layers.findIndex((x) => x.id === state.activeLayerId);
+    state.layers.splice(idx + 1, 0, l);
+    state.activeLayerId = l.id;
+    renderLayers();
+  }
+  function deleteLayer() {
+    if (state.layers.length <= 1) return;
+    beforeChange();
+    const idx = state.layers.findIndex((x) => x.id === state.activeLayerId);
+    state.layers.splice(idx, 1);
+    const next = state.layers[Math.min(idx, state.layers.length - 1)];
+    state.activeLayerId = next.id;
+    dirty = true; renderLayers(); updateStatus();
+  }
+  function moveLayer(dir) {
+    const idx = state.layers.findIndex((x) => x.id === state.activeLayerId), to = idx + dir;
+    if (to < 0 || to >= state.layers.length) return;
+    beforeChange();
+    const [l] = state.layers.splice(idx, 1);
+    state.layers.splice(to, 0, l);
+    dirty = true; renderLayers();
+  }
+  $('btnLayerAdd').addEventListener('click', addLayer);
+  $('btnLayerDel').addEventListener('click', deleteLayer);
+  $('btnLayerUp').addEventListener('click', () => moveLayer(1));
+  $('btnLayerDown').addEventListener('click', () => moveLayer(-1));
+
+  /* ---------------------------------------------------------- image import */
+  function importImageFile(file) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        beforeChange();
+        const l = makeLayer(file.name.replace(/\.[^.]+$/, '').slice(0, 40) || 'Image', 'image');
+        l.image = img; l.imageSrc = reader.result;
+        state.layers.unshift(l); // background = bottom of the stack
+        dirty = true; renderLayers();
+        toast('Image added as background layer');
+      };
+      img.onerror = () => toast('Could not read that image');
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  }
+  $('btnImage').addEventListener('click', () => $('fileImage').click());
+  $('fileImage').addEventListener('change', (e) => {
+    const f = e.target.files[0]; e.target.value = '';
+    if (f) importImageFile(f);
+  });
+
+  /* ------------------------------------------------------- save / load JSON */
+  const r2 = (v) => Math.round(v * 100) / 100;
+  function serialize() {
+    return {
+      app: 'drawimate', version: 1,
+      width: state.width, height: state.height,
+      background: state.background, loop: state.loop,
+      brushSettings: state.brushSettings,
+      activeLayer: state.layers.findIndex((l) => l.id === state.activeLayerId),
+      layers: state.layers.map((l) => ({
+        name: l.name, type: l.type, visible: l.visible,
+        imageSrc: l.type === 'image' ? l.imageSrc : undefined,
+        strokes: l.strokes.map((st) => ({
+          brush: st.brush, color: st.color, size: st.size, opacity: st.opacity,
+          speed: st.speed, amp: st.amp, freq: st.freq, seed: st.seed,
+          // [x, y, pressure, ms since stroke start]
+          points: st.points.map((p) => [r2(p.x), r2(p.y), Math.round(p.p * 1000) / 1000, p.t]),
+        })),
+      })),
+    };
+  }
+
+  const isHex = (c) => typeof c === 'string' && /^#[0-9a-f]{6}$/i.test(c);
+  const num = (v, d, lo, hi) => { v = Number(v); return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d; };
+
+  function deserialize(data) {
+    if (!data || data.app !== 'drawimate' || !Array.isArray(data.layers)) throw new Error('Not a Drawimate project');
+    const layers = [];
+    for (const L of data.layers) {
+      const l = makeLayer(String(L.name || 'Layer').slice(0, 40), L.type === 'image' ? 'image' : 'draw');
+      l.visible = L.visible !== false;
+      if (l.type === 'image') {
+        if (typeof L.imageSrc !== 'string' || !L.imageSrc.startsWith('data:image/')) continue;
+        l.imageSrc = L.imageSrc;
+        l.image = new Image();
+        l.image.onload = () => { dirty = true; };
+        l.image.src = L.imageSrc;
+      } else {
+        for (const S of (L.strokes || [])) {
+          if (!BRUSHES[S.brush] || !Array.isArray(S.points) || !S.points.length) continue;
+          const d = BRUSHES[S.brush].defaults;
+          l.strokes.push({
+            id: nextId(), brush: S.brush,
+            color: isHex(S.color) ? S.color : d.color,
+            size: num(S.size, d.size, 0.5, 200), opacity: num(S.opacity, d.opacity, 0, 1),
+            speed: num(S.speed, d.speed, 0, 10), amp: num(S.amp, d.amp, 0, 200), freq: num(S.freq, d.freq, 0, 20),
+            seed: num(S.seed, 1, 0, 1e9) | 0,
+            points: S.points.map((p) => ({ x: +p[0] || 0, y: +p[1] || 0, p: num(p[2], 0.5, 0, 1), t: +p[3] || 0 })),
+          });
+        }
+      }
+      layers.push(l);
+    }
+    if (!layers.length) layers.push(makeLayer('Layer 1'));
+    state.layers = layers;
+    const ai = num(data.activeLayer, layers.length - 1, 0, layers.length - 1) | 0;
+    state.activeLayerId = layers[ai].id;
+    state.width = num(data.width, 1280, 64, 4096) | 0;
+    state.height = num(data.height, 720, 64, 4096) | 0;
+    if (isHex(data.background)) state.background = data.background;
+    state.loop = num(data.loop, 4, 2, 10) | 0;
+    if (data.brushSettings) {
+      for (const k in BRUSHES) {
+        const src = data.brushSettings[k], dst = state.brushSettings[k];
+        if (!src) continue;
+        if (isHex(src.color)) dst.color = src.color;
+        for (const f of ['size', 'opacity', 'speed', 'amp', 'freq']) if (Number.isFinite(+src[f])) dst[f] = +src[f];
+      }
+    }
+    layerCounter = layers.length;
+    resetHistory();
+    $('ctlBg').value = state.background;
+    syncLoop(); syncCanvasSize(); syncBrushPanel();
+    layoutCanvas(); renderLayers(); updateStatus();
+  }
+
+  function download(blob, name) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  }
+  function saveProject() {
+    download(new Blob([JSON.stringify(serialize())], { type: 'application/json' }), 'drawimate-project.json');
+    toast('Project saved');
+  }
+  function loadProjectFile(file) {
+    file.text().then((txt) => { deserialize(JSON.parse(txt)); toast('Project loaded'); })
+      .catch((err) => toast('Could not load: ' + err.message));
+  }
+  $('btnSave').addEventListener('click', saveProject);
+  $('btnLoad').addEventListener('click', () => $('fileProject').click());
+  $('fileProject').addEventListener('change', (e) => {
+    const f = e.target.files[0]; e.target.value = '';
+    if (f) loadProjectFile(f);
+  });
+
+  // Drag & drop: images become background layers, .json files load.
+  stage.addEventListener('dragover', (e) => e.preventDefault());
+  stage.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const f = e.dataTransfer.files[0];
+    if (!f) return;
+    if (f.type.startsWith('image/')) importImageFile(f);
+    else if (f.name.endsWith('.json') || f.type === 'application/json') loadProjectFile(f);
+  });
 
   /* ------------------------------------------------------------- transport */
   function setPlaying(p) {
@@ -309,21 +632,32 @@
   }
 
   window.addEventListener('keydown', (e) => {
-    if (e.target.tagName === 'INPUT' && e.target.type !== 'range' && e.target.type !== 'color') return;
+    if ((e.target.tagName === 'INPUT' && e.target.type !== 'range' && e.target.type !== 'color') || e.target.tagName === 'SELECT') return;
     const mod = e.ctrlKey || e.metaKey;
     if (!mod && e.key >= '1' && e.key <= '5') { setTool(['scribble', 'flow', 'particle', 'smoke', 'pulse'][+e.key - 1]); }
     else if (!mod && (e.key === 'e' || e.key === 'E')) setTool('eraser');
     else if (!mod && e.code === 'Space') { e.preventDefault(); setPlaying(!state.playing); }
+    else if (mod && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); e.shiftKey ? redo() : undo(); }
+    else if (mod && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); redo(); }
+    else if (mod && (e.key === 's' || e.key === 'S')) { e.preventDefault(); saveProject(); }
+    else if (mod && (e.key === 'o' || e.key === 'O')) { e.preventDefault(); $('fileProject').click(); }
+    else if (!mod && (e.key === '[' || e.key === ']')) {
+      const d = e.key === ']' ? 1 : -1;
+      if (state.tool === 'eraser') { state.eraserSize = Math.max(4, Math.min(80, state.eraserSize + d * 2)); }
+      else { const s = state.brushSettings[state.tool]; s.size = Math.max(1, Math.min(80, s.size + d)); }
+      syncBrushPanel();
+    }
   });
 
   /* ------------------------------------------------------------------- boot */
   setTool('scribble');
   setPlaying(true);
   renderLayers();
+  syncHistoryButtons();
   updateStatus();
   layoutCanvas();
   requestAnimationFrame(frame);
 
   // Exposed for debugging and automated tests.
-  window.Drawimate = { state, renderScene, setTool, setPlaying, get fps() { return fps; }, get quality() { return quality; } };
+  window.Drawimate = { state, renderScene, setTool, setPlaying, undo, redo, serialize, deserialize, addLayer, deleteLayer, moveLayer, get fps() { return fps; }, get quality() { return quality; } };
 })();
