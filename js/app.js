@@ -158,7 +158,7 @@
   function onPointerDown(e) {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
     if (drawing) return;
-    canvas.setPointerCapture(e.pointerId);
+    try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* pointer already gone */ }
     const pt = toArtboard(e);
     if (state.tool === 'eraser') { eraserStart(e, pt); return; }
     const layer = activeLayer();
@@ -618,6 +618,124 @@
   });
   syncCanvasSize();
 
+  /* ----------------------------------------------------------------- export */
+  // Exports render offscreen at artboard resolution, at exact loop times
+  // t = i / fps for i in [0, loop·fps), so frame N would equal frame 0 —
+  // the clip loops seamlessly.
+  let exporting = null;
+
+  function exportCanvas() {
+    const c = document.createElement('canvas');
+    c.width = state.width; c.height = state.height;
+    return c;
+  }
+  function startExport(label) {
+    if (drawing || erasing) return null;
+    exporting = { cancelled: false };
+    suspendLive = true;
+    $('modalText').textContent = label;
+    $('modalBar').style.width = '0%';
+    $('modal').hidden = false;
+    $('btnWebm').disabled = $('btnZip').disabled = true;
+    return exporting;
+  }
+  function endExport() {
+    exporting = null;
+    suspendLive = false; dirty = true;
+    $('modal').hidden = true;
+    $('btnWebm').disabled = $('btnZip').disabled = false;
+  }
+  const setProgress = (f, text) => {
+    $('modalBar').style.width = (f * 100).toFixed(1) + '%';
+    if (text) $('modalText').textContent = text;
+  };
+  $('modalCancel').addEventListener('click', () => { if (exporting) exporting.cancelled = true; });
+
+  function pickVideoMime() {
+    const types = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+    return types.find((t) => window.MediaRecorder && MediaRecorder.isTypeSupported(t));
+  }
+
+  async function exportWebm() {
+    const mime = pickVideoMime();
+    const c = exportCanvas();
+    if (!mime || !c.captureStream) { toast('This browser cannot record WebM video'); return; }
+    const job = startExport('Recording…');
+    if (!job) return;
+    const fps = +$('ctlFps').value, L = state.loop, total = Math.round(L * fps);
+    const g = c.getContext('2d');
+    g.setTransform(1, 0, 0, 1, 0, 0);
+
+    // captureStream(0): frames are only emitted when we call requestFrame(),
+    // so every frame in the file is one we rendered at an exact loop time.
+    const stream = c.captureStream(0);
+    const track = stream.getVideoTracks()[0];
+    const rec = new MediaRecorder(stream, {
+      mimeType: mime,
+      videoBitsPerSecond: Math.min(25e6, Math.max(2.5e6, state.width * state.height * fps * 0.12)),
+    });
+    const chunks = [];
+    rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    const stopped = new Promise((res) => { rec.onstop = res; });
+    rec.start(250);
+
+    // Pace frames in real time so the recorded timestamps match playback speed.
+    const t0 = performance.now();
+    let sent = 0;
+    await new Promise((resolve) => {
+      const tick = () => {
+        if (job.cancelled) return resolve();
+        const due = Math.min(total, Math.floor((performance.now() - t0) / 1000 * fps) + 1);
+        if (due > sent) {
+          const i = due - 1;                      // render the latest due frame
+          renderScene(g, i / fps);
+          if (track.requestFrame) track.requestFrame();
+          sent = due;
+          setProgress(sent / total, `Recording ${(i / fps).toFixed(1)}s / ${L}s — keep this tab visible`);
+        }
+        if (sent >= total && performance.now() - t0 >= L * 1000) return resolve();
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+    rec.stop();
+    await stopped;
+    track.stop();
+    const cancelled = job.cancelled;
+    endExport();
+    if (cancelled) { toast('Export cancelled'); return; }
+    download(new Blob(chunks, { type: 'video/webm' }), `drawimate-loop-${L}s.webm`);
+    toast('WebM exported');
+  }
+
+  async function exportZip() {
+    const job = startExport('Rendering frames…');
+    if (!job) return;
+    const fps = +$('ctlFps').value, L = state.loop, total = Math.round(L * fps);
+    const c = exportCanvas(), g = c.getContext('2d');
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    const zip = new DMZip.ZipWriter();
+    const digits = String(total - 1).length;
+    try {
+      for (let i = 0; i < total; i++) {
+        if (job.cancelled) break;
+        renderScene(g, i / fps);
+        const blob = await new Promise((res) => c.toBlob(res, 'image/png'));
+        zip.add(`frame_${String(i).padStart(Math.max(4, digits), '0')}.png`, new Uint8Array(await blob.arrayBuffer()));
+        setProgress((i + 1) / total, `Rendering frame ${i + 1} / ${total}`);
+      }
+    } catch (err) {
+      endExport(); toast('Export failed: ' + err.message); return;
+    }
+    const cancelled = job.cancelled;
+    endExport();
+    if (cancelled) { toast('Export cancelled'); return; }
+    download(zip.finish(), `drawimate-frames-${L}s-${fps}fps.zip`);
+    toast(`${total} PNG frames exported`);
+  }
+  $('btnWebm').addEventListener('click', exportWebm);
+  $('btnZip').addEventListener('click', exportZip);
+
   /* ---------------------------------------------------------------- misc UI */
   let toastTimer = 0;
   function toast(msg) {
@@ -632,6 +750,7 @@
   }
 
   window.addEventListener('keydown', (e) => {
+    if (exporting) return;
     if ((e.target.tagName === 'INPUT' && e.target.type !== 'range' && e.target.type !== 'color') || e.target.tagName === 'SELECT') return;
     const mod = e.ctrlKey || e.metaKey;
     if (!mod && e.key >= '1' && e.key <= '5') { setTool(['scribble', 'flow', 'particle', 'smoke', 'pulse'][+e.key - 1]); }
@@ -659,5 +778,5 @@
   requestAnimationFrame(frame);
 
   // Exposed for debugging and automated tests.
-  window.Drawimate = { state, renderScene, setTool, setPlaying, undo, redo, serialize, deserialize, addLayer, deleteLayer, moveLayer, get fps() { return fps; }, get quality() { return quality; } };
+  window.Drawimate = { state, renderScene, exportWebm, exportZip, setTool, setPlaying, undo, redo, serialize, deserialize, addLayer, deleteLayer, moveLayer, get fps() { return fps; }, get quality() { return quality; } };
 })();
