@@ -111,18 +111,83 @@
   /* ---------------------------------------------------------------- brushes */
   const BRUSHES = {};
 
-  // 1. Scribble — nervous "boiling line": the pose jumps a few times per second.
+  // 1. Scribble — the "boiling line": each stroke is drawn as several thin
+  // strands that each bend away from the drawn path by a smooth, slowly
+  // varying offset. The pose holds, then jumps to a new one several times a
+  // second. With wiggle at 0 the strands coincide into one clean line.
+  const STRANDS = 3;
+  const RESAMPLE = 5; // px between strand vertices
+  const BOIL_RATE = 7;
+  const SHIFT = 0.58, BEND = 0.78; // strand motion mix (tuned to reference footage)
+
+  /* Stroke resampled to even 3px spacing (cached; refreshed while drawing).
+   * Raw input arrives every ~1.5px, which is denser than the strands need. */
+  function resampled(st) {
+    const pts = st.points, n = pts.length;
+    if (st._rN === n) return st._r;
+    const s = prep(st), total = s[n - 1];
+    const m = Math.max(1, Math.floor(total / RESAMPLE)) + 1;
+    const r = st._r && st._r.x.length >= m ? st._r
+      : { x: new Float32Array(m + 64), y: new Float32Array(m + 64), p: new Float32Array(m + 64), s: new Float32Array(m + 64), n: 0 };
+    let j = 0;
+    for (let q = 0; q < m; q++) {
+      const target = q === m - 1 ? total : q * RESAMPLE;
+      while (j < n - 2 && s[j + 1] < target) j++;
+      const a = pts[j], b = pts[Math.min(j + 1, n - 1)], seg = (s[Math.min(j + 1, n - 1)] - s[j]) || 1;
+      const t = n > 1 ? Math.min(1, Math.max(0, (target - s[j]) / seg)) : 0;
+      r.x[q] = a.x + (b.x - a.x) * t; r.y[q] = a.y + (b.y - a.y) * t;
+      r.p[q] = a.p + (b.p - a.p) * t; r.s[q] = target;
+    }
+    r.n = n > 1 ? m : 1;
+    st._r = r; st._rN = n;
+    return r;
+  }
+
   BRUSHES.scribble = {
-    label: 'Scribble',
-    defaults: { color: '#1d1c22', size: 6, opacity: 1, speed: 1, amp: 3, freq: 1.2 },
+    label: 'Scribbles',
+    boilRate: BOIL_RATE, // poses per second at speed 1 (the renderer redraws only on pose changes)
+    defaults: { color: '#000000', size: 5.6, opacity: 1, speed: 1, amp: 4, freq: 1.4 },
     render(ctx, st, f) {
-      const boils = cyclesPerLoop(st.speed, f.L, 6);           // ~6 boils / sec at speed 1
+      if (!st.points.length) return;
+      const r = resampled(st), n = r.n;
+      ensure(n);
+      const boils = cyclesPerLoop(st.speed, f.L, BOIL_RATE);    // ~7 poses / sec at speed 50%
       const theta = boils ? TAU * Math.floor(f.u * boils) / boils : 0;
-      // Large time-circle radius → successive boils are near-independent poses.
-      const n = displace(st, theta, st.amp, st.freq * 0.02, 5);
-      if (!n) return;
+      const R = 6;                                               // far-apart samples → independent poses
+      const c = Math.cos(theta) * R, sn = Math.sin(theta) * R;
+      const amp = st.amp, hw = st.size * 0.5;
+      const k1 = st.freq * 0.003, k2 = st.freq * 0.03;          // long bend + fine tremble
+      const fine = Math.min(0.18, 1 / Math.max(amp, 1e-6));      // tremble capped near 1px
+      const sd = st.seed % 1000;
+      for (let i = 0; i < n; i++) W[i] = hw * pressureScale(r.p[i]);
       ctx.globalAlpha = st.opacity;
-      fillStroke(ctx, st, n);
+      ctx.fillStyle = st.color;
+      ctx.beginPath();                                           // all strands → one fill
+      for (let k = 0; k < STRANDS; k++) {
+        if (amp <= 0) {                                          // coincident strands: draw once
+          for (let i = 0; i < n; i++) { X[i] = r.x[i]; Y[i] = r.y[i]; }
+          ribbonSplit(ctx, 0, n - 1, true, true);
+          break;
+        }
+        const o = sd + k * 73.3;
+        // each strand: a whole-line shift + a long, slow bend + a little tremble
+        const tx = SHIFT * noise(o + 211.7, c, sn), ty = SHIFT * noise(o + 307.3, c + 9.7, sn);
+        // noise at every other vertex, linear in between (offsets vary slowly)
+        for (let i = 0; i < n; i += 2) {
+          const a = r.s[i] * k1, b = r.s[i] * k2;
+          X[i] = amp * (tx + BEND * noise(o + a, c, sn) + fine * noise(o + 31.4 + b, c, sn));
+          Y[i] = amp * (ty + BEND * noise(o + 57.9 + a, c + 9.7, sn) + fine * noise(o + 88.1 + b, c + 9.7, sn));
+        }
+        if ((n - 1) % 2) {                                       // make sure the last vertex is sampled
+          const i = n - 1, a = r.s[i] * k1, b = r.s[i] * k2;
+          X[i] = amp * (tx + BEND * noise(o + a, c, sn) + fine * noise(o + 31.4 + b, c, sn));
+          Y[i] = amp * (ty + BEND * noise(o + 57.9 + a, c + 9.7, sn) + fine * noise(o + 88.1 + b, c + 9.7, sn));
+        }
+        for (let i = 1; i < n - 1; i += 2) { X[i] = (X[i - 1] + X[i + 1]) * 0.5; Y[i] = (Y[i - 1] + Y[i + 1]) * 0.5; }
+        for (let i = 0; i < n; i++) { X[i] += r.x[i]; Y[i] += r.y[i]; }
+        ribbonSplit(ctx, 0, n - 1, true, true);
+      }
+      ctx.fill();
     },
   };
 
@@ -238,7 +303,7 @@
 
   // 3. Particle — dots burst outward from the stroke and drift back home.
   BRUSHES.particle = {
-    label: 'Particle',
+    label: 'Particles',
     defaults: { color: '#e8452c', size: 5, opacity: 0.9, speed: 0.5, amp: 14, freq: 1.5 },
     render(ctx, st, f) {
       const cyc = cyclesPerLoop(st.speed, f.L, 0.5);
@@ -396,7 +461,39 @@
     },
   };
 
+  /* ------------------------------------------------- percentage controls
+   * The UI works in percentages (Speed, Thickness, Wiggle, Detail). These map
+   * to each stroke's internal pixel values when the stroke is created.
+   * Calibrated against reference footage on a 1320×1320 canvas:
+   *   Thickness 40%  → 5.6px strands
+   *   Speed 50%      → ~7 boils per second
+   *   Wiggle 13%     → 4px strand offset (band ≈ 11.5px); 50% → 23.6px; 100% → 50.1px */
+  const PCT_DEFAULTS = { thickness: 40, speed: 50, wiggle: 13, detail: 25 };
+  const PCT_BRUSH = {
+    scribble: { sizeMult: 1.0, opacity: 1 },
+    flow:     { sizeMult: 2.2, opacity: 1,   ampPerPct: 0.3 },
+    particle: { sizeMult: 1.1, opacity: 0.9, ampPerPct: 1.1 },
+    smoke:    { sizeMult: 3.0, opacity: 0.6, ampPerPct: 0.8 },
+    pulse:    { sizeMult: 2.2, opacity: 1,   ampPerPct: 0.9 },
+  };
+  const thicknessPx = (t) => 0.5 + 32 * (t / 100) * (t / 100);
+  function scribbleAmp(w) {
+    if (w <= 5) return 0.08 * w;
+    if (w <= 10) return 0.4 + 0.4 * (w - 5);
+    return 0.53 * w - 2.9;
+  }
+  function fromPercent(brush, pct) {
+    const cfg = PCT_BRUSH[brush];
+    return {
+      size: +(thicknessPx(pct.thickness) * cfg.sizeMult).toFixed(2),
+      speed: pct.speed / 50,
+      amp: +(brush === 'scribble' ? scribbleAmp(pct.wiggle) : pct.wiggle * cfg.ampPerPct).toFixed(2),
+      freq: +(0.2 + pct.detail * 0.048).toFixed(3),
+    };
+  }
+
   global.DMBrushes = {
+    PCT_DEFAULTS, PCT_BRUSH, fromPercent,
     BRUSHES, haze, noise, hash3, prep, displace, ribbon, ribbonSplit, fillStroke,
     cyclesPerLoop, pressureScale, TAU,
     buf: () => ({ X, Y, W }),

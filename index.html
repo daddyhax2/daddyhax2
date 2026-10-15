@@ -2,163 +2,144 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Drawimate</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&display=swap">
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand"><span class="logo"></span>Drawimate</div>
-    <div class="status" id="status">
-      <span id="statStrokes">0 strokes</span>
-      <span id="statFps">– fps</span>
-    </div>
-  </header>
-
-  <div class="app">
-    <!-- Left toolbar -->
-    <nav class="toolbar" id="toolbar" aria-label="Tools">
-      <div class="tool-group" id="brushTools">
-        <button class="tool" data-tool="scribble" title="Scribble (1)">
-          <svg viewBox="0 0 24 24"><path d="M3 15c2-4 3-8 5-7s-1 7 1 8 3-9 5-9 0 8 2 8 2-5 5-6"/></svg>
-          <span>Scribble</span>
-        </button>
-        <button class="tool" data-tool="flow" title="Flow (2)">
-          <svg viewBox="0 0 24 24"><path d="M3 16c3 0 4-8 9-8s6 8 9 8"/><path d="M3 12c3 0 4-5 9-5" opacity=".45"/></svg>
-          <span>Flow</span>
-        </button>
-        <button class="tool" data-tool="particle" title="Particle (3)">
-          <svg viewBox="0 0 24 24"><circle cx="5" cy="15" r="1.4"/><circle cx="9" cy="10" r="1.2"/><circle cx="12" cy="16" r="1.6"/><circle cx="15" cy="8" r="1"/><circle cx="18" cy="13" r="1.4"/><circle cx="20" cy="6" r=".9"/></svg>
-          <span>Particle</span>
-        </button>
-        <button class="tool" data-tool="smoke" title="Smoke (4)">
-          <svg viewBox="0 0 24 24"><path d="M6 20c-2-3 2-4 0-7s2-5 1-8"/><path d="M12 20c-2-3 2-4 0-7s2-5 1-8" opacity=".6"/><path d="M18 20c-2-3 2-4 0-7s2-5 1-8" opacity=".35"/></svg>
-          <span>Smoke</span>
-        </button>
-        <button class="tool" data-tool="pulse" title="Pulse (5)">
-          <svg viewBox="0 0 24 24"><path d="M3 12h4l2-5 3 10 3-8 2 3h4"/></svg>
-          <span>Pulse</span>
-        </button>
-        <button class="tool" data-tool="eraser" title="Eraser — removes whole strokes (E)">
-          <svg viewBox="0 0 24 24"><path d="M15 4l5 5-9 9H6l-3-3z"/><path d="M9 20h12"/></svg>
-          <span>Eraser</span>
-        </button>
-      </div>
-      <div class="tool-sep"></div>
-      <div class="tool-group">
-        <button class="tool" id="btnUndo" title="Undo (Ctrl+Z)">
+  <div class="app" id="app">
+    <!-- Top bar: history + playback on the left, ink / paper swatches on the right -->
+    <header class="top">
+      <div class="top-group">
+        <button class="sq" id="btnUndo" title="Undo (Ctrl+Z)" aria-label="Undo">
           <svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 010 12h-3"/></svg>
-          <span>Undo</span>
         </button>
-        <button class="tool" id="btnRedo" title="Redo (Ctrl+Shift+Z)">
+        <button class="sq" id="btnRedo" title="Redo (Ctrl+Shift+Z)" aria-label="Redo">
           <svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5"/><path d="M20 9H10a6 6 0 000 12h3"/></svg>
-          <span>Redo</span>
         </button>
-        <button class="tool" id="btnClear" title="Clear layer">
-          <svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>
-          <span>Clear</span>
-        </button>
-      </div>
-      <div class="tool-sep"></div>
-      <div class="tool-group">
-        <button class="tool" id="btnPlay" title="Play / pause (Space)">
+        <button class="sq" id="btnPlay" title="Play / pause (Space)" aria-label="Pause animation">
           <svg viewBox="0 0 24 24" class="ico-pause"><path d="M8 5v14M16 5v14"/></svg>
-          <svg viewBox="0 0 24 24" class="ico-play"><path d="M7 5l12 7-12 7z"/></svg>
-          <span>Pause</span>
-        </button>
-        <button class="tool" id="btnImage" title="Import background image">
-          <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 16l5-5 4 4 3-3 6 6"/><circle cx="15.5" cy="9" r="1.3"/></svg>
-          <span>Image</span>
+          <svg viewBox="0 0 24 24" class="ico-play"><path d="M7 5l12 7-12 7z" class="solid"/></svg>
         </button>
       </div>
-      <div class="tool-sep"></div>
-      <div class="tool-group">
-        <button class="tool" id="btnSave" title="Save project (Ctrl+S)">
-          <svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M4 20h16"/></svg>
-          <span>Save</span>
-        </button>
-        <button class="tool" id="btnLoad" title="Open project (Ctrl+O)">
-          <svg viewBox="0 0 24 24"><path d="M12 20V9M7 14l5-5 5 5M4 4h16"/></svg>
-          <span>Open</span>
-        </button>
+      <div class="top-status" id="statFps" aria-hidden="true"></div>
+      <div class="top-group">
+        <label class="swatch" title="Ink colour"><input type="color" id="ctlInk" aria-label="Ink colour"><span></span></label>
+        <label class="swatch" title="Paper colour"><input type="color" id="ctlBg" aria-label="Paper colour"><span></span></label>
       </div>
-      <input type="file" id="fileImage" accept="image/*" hidden>
-      <input type="file" id="fileProject" accept=".json,application/json" hidden>
-    </nav>
+    </header>
 
-    <!-- Canvas -->
+    <!-- Canvas + the vertical wiggle bar -->
     <main class="stage" id="stage">
       <canvas id="canvas"></canvas>
+      <div class="vslider" id="vslider" role="slider" tabindex="0" aria-label="Wiggle" aria-valuemin="0" aria-valuemax="100">
+        <div class="vs-val" id="vsVal">13%</div>
+        <div class="vs-track" id="vsTrack">
+          <div class="vs-fill" id="vsFill"></div>
+          <div class="vs-handle" id="vsHandle"></div>
+        </div>
+      </div>
       <div class="cursor-ring" id="cursorRing"></div>
-      <div class="toast" id="toast"></div>
+      <div class="toast" id="toast" role="status"></div>
     </main>
 
-    <!-- Right panel -->
-    <aside class="panel" id="panel">
-      <section class="card" id="brushCard">
-        <h2 id="brushTitle">Scribble</h2>
-        <div id="brushControls">
-          <label class="row color-row">
-            <span>Color</span>
-            <input type="color" id="ctlColor">
-          </label>
-          <label class="row"><span>Size</span><input type="range" id="ctlSize" min="1" max="80" step="0.5"><output></output></label>
-          <label class="row"><span>Opacity</span><input type="range" id="ctlOpacity" min="0.05" max="1" step="0.01"><output></output></label>
-          <label class="row"><span>Speed</span><input type="range" id="ctlSpeed" min="0" max="3" step="0.05"><output></output></label>
-          <label class="row"><span>Amplitude</span><input type="range" id="ctlAmp" min="0" max="30" step="0.1"><output></output></label>
-          <label class="row"><span>Frequency</span><input type="range" id="ctlFreq" min="0.1" max="5" step="0.05"><output></output></label>
-        </div>
-        <div id="eraserControls" hidden>
-          <label class="row"><span>Size</span><input type="range" id="ctlEraser" min="4" max="80" step="1"><output></output></label>
-          <p class="hint">Drag across strokes to remove them whole.</p>
-        </div>
-      </section>
-
-      <section class="card" id="layersCard">
-        <div class="card-head">
-          <h2>Layers</h2>
-          <div class="icon-btns">
-            <button id="btnLayerAdd" title="Add layer">+</button>
-            <button id="btnLayerUp" title="Move up">▲</button>
-            <button id="btnLayerDown" title="Move down">▼</button>
-            <button id="btnLayerDel" title="Delete layer">✕</button>
-          </div>
-        </div>
-        <ul class="layers" id="layerList"></ul>
-      </section>
-
-      <section class="card">
-        <h2>Canvas</h2>
-        <label class="row color-row"><span>Background</span><input type="color" id="ctlBg"></label>
-        <label class="row select-row"><span>Size</span>
-          <select id="ctlCanvasSize">
-            <option value="1280x720">1280 × 720</option>
-            <option value="1920x1080">1920 × 1080</option>
-            <option value="1080x1080">1080 × 1080</option>
-            <option value="1080x1920">1080 × 1920</option>
-          </select>
-        </label>
-        <label class="row"><span>Loop</span><input type="range" id="ctlLoop" min="2" max="10" step="1"><output></output></label>
-      </section>
-
-      <section class="card">
-        <h2>Export</h2>
-        <label class="row select-row"><span>Frame rate</span>
-          <select id="ctlFps">
-            <option value="12">12 fps</option>
-            <option value="24">24 fps</option>
-            <option value="30" selected>30 fps</option>
-            <option value="60">60 fps</option>
-          </select>
-        </label>
-        <div class="btn-row">
-          <button class="btn primary" id="btnWebm">Record WebM</button>
-          <button class="btn" id="btnZip">PNG frames .zip</button>
-        </div>
-        <p class="hint">Exports one seamless loop of the length set above.</p>
-      </section>
-    </aside>
+    <!-- Bottom dock -->
+    <nav class="dock" aria-label="Tools">
+      <button class="dock-btn" id="toolPencil" title="Brush (B) — tap again for brushes" aria-label="Brush">
+        <svg viewBox="0 0 24 24"><path d="M15.5 4.5l4 4L8 20H4v-4z"/><path d="M13 7l4 4"/></svg>
+      </button>
+      <button class="dock-btn" id="toolEraser" title="Eraser — removes whole strokes (E)" aria-label="Eraser">
+        <svg viewBox="0 0 24 24"><path d="M14 4l6 6-8.5 8.5H7L4 15.5z"/><path d="M9.5 8.5l6 6"/></svg>
+      </button>
+      <button class="dock-btn" id="toolLayers" title="Layers (L)" aria-label="Layers">
+        <svg viewBox="0 0 24 24"><path d="M12 4l9 5-9 5-9-5z"/><path d="M3 14l9 5 9-5"/></svg>
+      </button>
+      <button class="dock-btn" id="toolMove" title="Move layer (M)" aria-label="Move">
+        <svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3"/></svg>
+      </button>
+      <button class="dock-btn" id="toolShare" title="Export &amp; project" aria-label="Share">
+        <svg viewBox="0 0 24 24"><path d="M12 15V3M8 7l4-4 4 4"/><path d="M5 11v9h14v-9"/></svg>
+      </button>
+    </nav>
   </div>
+
+  <!-- Brushes sheet -->
+  <section class="sheet" id="sheetBrushes" hidden aria-label="Brushes">
+    <div class="sheet-head">
+      <h1>Brushes</h1>
+      <button class="sq close" data-close aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+    <div class="cards" id="brushCards"></div>
+    <div class="sheet-body">
+      <div class="hrow"><div class="hrow-top"><label for="ctlSpeed">Speed</label><output id="outSpeed"></output></div>
+        <input type="range" id="ctlSpeed" min="0" max="100" step="1"></div>
+      <div class="hrow"><div class="hrow-top"><label for="ctlThickness">Thickness</label><output id="outThickness"></output></div>
+        <input type="range" id="ctlThickness" min="0" max="100" step="1"></div>
+      <div class="hrow"><div class="hrow-top"><label for="ctlOpacity">Opacity</label><output id="outOpacity"></output></div>
+        <input type="range" id="ctlOpacity" min="5" max="100" step="1"></div>
+      <div class="hrow"><div class="hrow-top"><label for="ctlDetail">Detail</label><output id="outDetail"></output></div>
+        <input type="range" id="ctlDetail" min="0" max="100" step="1"></div>
+      <button class="text-btn" id="btnResetBrush">Reset to defaults</button>
+    </div>
+  </section>
+
+  <!-- Layers sheet -->
+  <section class="sheet" id="sheetLayers" hidden aria-label="Layers">
+    <div class="sheet-head">
+      <h1>Layers</h1>
+      <button class="sq close" data-close aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+    <div class="sheet-body">
+      <ul class="layers" id="layerList"></ul>
+      <div class="btn-grid">
+        <button class="btn" id="btnLayerAdd">Add layer</button>
+        <button class="btn" id="btnLayerUp">Move up</button>
+        <button class="btn" id="btnLayerDown">Move down</button>
+        <button class="btn" id="btnLayerDel">Delete</button>
+        <button class="btn" id="btnClear">Clear layer</button>
+        <button class="btn" id="btnImage">Add image</button>
+      </div>
+      <p class="hint">Double-click a name to rename it. Images go to the bottom as a background.</p>
+    </div>
+  </section>
+
+  <!-- Share sheet -->
+  <section class="sheet" id="sheetShare" hidden aria-label="Share">
+    <div class="sheet-head">
+      <h1>Share</h1>
+      <button class="sq close" data-close aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+    <div class="sheet-body">
+      <div class="hrow"><div class="hrow-top"><label for="ctlLoop">Loop length</label><output id="outLoop"></output></div>
+        <input type="range" id="ctlLoop" min="2" max="10" step="1"></div>
+      <div class="field"><label for="ctlFps">Frame rate</label>
+        <select id="ctlFps"><option value="12">12 fps</option><option value="24">24 fps</option><option value="30" selected>30 fps</option><option value="60">60 fps</option></select></div>
+      <div class="btn-grid">
+        <button class="btn primary" id="btnWebm">Record WebM</button>
+        <button class="btn" id="btnZip">PNG frames .zip</button>
+      </div>
+      <h2>Project</h2>
+      <div class="btn-grid">
+        <button class="btn" id="btnSave">Save project</button>
+        <button class="btn" id="btnLoad">Open project</button>
+      </div>
+      <div class="field"><label for="ctlCanvasSize">Canvas</label>
+        <select id="ctlCanvasSize">
+          <option value="1320x1320">1320 × 1320 square</option>
+          <option value="1080x1080">1080 × 1080 square</option>
+          <option value="1280x720">1280 × 720</option>
+          <option value="1920x1080">1920 × 1080</option>
+          <option value="1080x1920">1080 × 1920 portrait</option>
+        </select></div>
+      <div id="extraShare"></div>
+      <p class="hint">Exports render one seamless loop at full canvas size.</p>
+    </div>
+  </section>
+
+  <input type="file" id="fileImage" accept="image/*" hidden>
+  <input type="file" id="fileProject" accept=".json,application/json" hidden>
 
   <div class="modal" id="modal" hidden>
     <div class="modal-box">

@@ -1,7 +1,8 @@
 /* Drawimate — application: state, input, render loop, UI. */
 (function () {
   'use strict';
-  const { BRUSHES } = DMBrushes;
+  const { BRUSHES, PCT_DEFAULTS, PCT_BRUSH, fromPercent } = DMBrushes;
+  const BRUSH_ORDER = ['scribble', 'flow', 'particle', 'smoke', 'pulse'];
   const $ = (id) => document.getElementById(id);
 
   /* ------------------------------------------------------------------ state */
@@ -11,25 +12,31 @@
   function makeLayer(name, type) {
     return { id: nextId(), name, type: type || 'draw', visible: true, strokes: [], image: null, imageSrc: null };
   }
+  function defaultPct(brush) {
+    return Object.assign({}, PCT_DEFAULTS, { opacity: Math.round(PCT_BRUSH[brush].opacity * 100) });
+  }
 
   const state = {
-    width: 1280, height: 720,
-    background: '#f3eee4',
+    width: 1320, height: 1320,
+    background: '#ffffff',
+    ink: '#000000',
     loop: 4,                 // seconds; every animation repeats exactly this often
     playing: true,
     time: 0,                 // animation clock in seconds
-    tool: 'scribble',
-    eraserSize: 20,
+    tool: 'pencil',          // pencil | eraser | move
+    brush: 'scribble',
+    eraserPct: 20,
     layers: [],
     activeLayerId: 0,
-    brushSettings: {},       // per-brush settings, edited in the right panel
+    pct: {},                 // per-brush settings in percent: thickness, speed, wiggle, detail, opacity
   };
-  for (const k in BRUSHES) state.brushSettings[k] = Object.assign({}, BRUSHES[k].defaults);
+  for (const k of BRUSH_ORDER) state.pct[k] = defaultPct(k);
   state.layers.push(makeLayer('Layer 1'));
   state.activeLayerId = state.layers[0].id;
 
   const activeLayer = () => state.layers.find((l) => l.id === state.activeLayerId);
   const strokeCount = () => state.layers.reduce((n, l) => n + l.strokes.length, 0);
+  const eraserRadius = () => 4 + state.eraserPct * 1.2;
 
   /* ----------------------------------------------------------------- canvas */
   const canvas = $('canvas');
@@ -39,10 +46,9 @@
   let quality = 1; // adaptive resolution factor (drops on slow devices)
 
   function layoutCanvas() {
-    const pad = Math.min(28, Math.max(8, stage.clientWidth * 0.04));
     const r = stage.getBoundingClientRect();
-    viewScale = Math.min((r.width - pad * 2) / state.width, (r.height - pad * 2) / state.height);
-    viewScale = Math.max(0.05, viewScale);
+    const padX = Math.min(24, Math.max(0, r.width * 0.02)), padY = Math.min(24, Math.max(4, r.height * 0.02));
+    viewScale = Math.max(0.05, Math.min((r.width - padX * 2) / state.width, (r.height - padY * 2) / state.height));
     dpr = Math.min(window.devicePixelRatio || 1, 2) * quality;
     const cssW = Math.round(state.width * viewScale), cssH = Math.round(state.height * viewScale);
     canvas.style.width = cssW + 'px';
@@ -74,17 +80,41 @@
     c.fillRect(0, 0, state.width, state.height);
     for (const layer of state.layers) {
       if (!layer.visible) continue;
-      if (layer.type === 'image') { drawImageLayer(c, layer, state.width, state.height); continue; }
-      for (const st of layer.strokes) {
-        const b = BRUSHES[st.brush];
-        if (!b || !st.points.length) continue;
-        if (st.brush !== 'smoke') DMBrushes.haze.flush(c); // keep stacking order
-        b.render(c, st, f);
+      const moved = moving && moving.layerId === layer.id;
+      if (moved) { c.save(); c.translate(moving.dx, moving.dy); }
+      if (layer.type === 'image') drawImageLayer(c, layer, state.width, state.height);
+      else {
+        for (const st of layer.strokes) {
+          const b = BRUSHES[st.brush];
+          if (!b || !st.points.length) continue;
+          if (st.brush !== 'smoke') DMBrushes.haze.flush(c); // keep stacking order
+          b.render(c, st, f);
+        }
+        DMBrushes.haze.flush(c);
       }
-      DMBrushes.haze.flush(c);
+      if (moved) c.restore();
     }
     c.globalAlpha = 1;
   }
+
+  /* Scribble strokes only change pose a few times per second. If every visible
+   * stroke is a Scribble, this key changes only when some pose changes, so the
+   * canvas can skip identical frames. Returns null when anything moves smoothly. */
+  function sceneKey() {
+    const L = state.loop, u = (((state.time % L) + L) % L) / L, rate = BRUSHES.scribble.boilRate;
+    const poses = new Map();
+    for (const layer of state.layers) {
+      if (!layer.visible || layer.type !== 'draw') continue;
+      for (const st of layer.strokes) {
+        if (st.brush !== 'scribble') return null;
+        if (!poses.has(st.speed)) poses.set(st.speed, DMBrushes.cyclesPerLoop(st.speed, L, rate));
+      }
+    }
+    let key = '';
+    for (const boils of poses.values()) key += boils + ':' + Math.floor(u * boils) + ',';
+    return key;
+  }
+  let lastKey = null;
 
   let dirty = true;
   let lastFrame = performance.now();
@@ -94,13 +124,19 @@
   function frame(now) {
     const dt = Math.min(0.1, (now - lastFrame) / 1000);
     lastFrame = now;
-    if (state.playing) { state.time += dt; dirty = true; }
+    if (state.playing) {
+      state.time += dt;
+      const key = sceneKey();
+      if (key === null || key !== lastKey) dirty = true;
+      lastKey = key;
+    }
     if (dirty && !suspendLive) {
       const s = viewScale * dpr;
       ctx.setTransform(s, 0, 0, s, 0, 0);
       renderScene(ctx, state.time);
       dirty = false;
     }
+    if (!$('sheetBrushes').hidden) renderPreviews();
     fpsFrames++; fpsTime += dt;
     if (fpsTime >= 0.5) {
       fps = fpsFrames / fpsTime; fpsFrames = 0; fpsTime = 0;
@@ -131,42 +167,44 @@
     return e.pressure;
   }
 
-  let drawing = null; // { stroke, pointerId, t0, last }
+  let drawing = null; // { stroke, pointerId, t0 }
+  let moving = null;  // { layerId, pointerId, start, dx, dy }
 
   function newStroke(brush) {
-    const s = state.brushSettings[brush];
+    const p = state.pct[brush], m = fromPercent(brush, p);
     return {
       id: nextId(), brush,
-      color: s.color, size: s.size, opacity: s.opacity,
-      speed: s.speed, amp: s.amp, freq: s.freq,
+      color: state.ink, size: m.size, opacity: p.opacity / 100,
+      speed: m.speed, amp: m.amp, freq: m.freq,
       seed: Math.floor(Math.random() * 1e6),
       points: [],
     };
   }
 
   function addPoint(pt, p, t, force) {
-    const st = drawing.stroke, pts = st.points;
+    const pts = drawing.stroke.points;
     const last = pts[pts.length - 1];
-    if (last && !force) {
-      const d = Math.hypot(pt.x - last.x, pt.y - last.y);
-      if (d < 1.5) return; // keep data light; ~1.5 artboard px spacing
-    }
+    if (last && !force && Math.hypot(pt.x - last.x, pt.y - last.y) < 1.5) return; // ~1.5px spacing
     pts.push({ x: pt.x, y: pt.y, p, t });
     dirty = true;
   }
 
   function onPointerDown(e) {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
-    if (drawing) return;
+    if (drawing || erasing || moving) return;
     try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* pointer already gone */ }
     const pt = toArtboard(e);
     if (state.tool === 'eraser') { eraserStart(e, pt); return; }
     const layer = activeLayer();
-    if (!layer || layer.type !== 'draw') { toast('Select a drawing layer first'); return; }
-    if (!layer.visible) { toast('Layer is hidden'); return; }
-    if (!BRUSHES[state.tool]) return;
+    if (state.tool === 'move') {
+      if (!layer || layer.type !== 'draw' || !layer.strokes.length) { toast('Nothing to move on this layer'); return; }
+      moving = { layerId: layer.id, pointerId: e.pointerId, start: pt, dx: 0, dy: 0 };
+      return;
+    }
+    if (!layer || layer.type !== 'draw') { toast('Pick a drawing layer first'); return; }
+    if (!layer.visible) { toast('This layer is hidden'); return; }
     beforeChange();
-    const stroke = newStroke(state.tool);
+    const stroke = newStroke(state.brush);
     layer.strokes.push(stroke);
     drawing = { stroke, pointerId: e.pointerId, t0: e.timeStamp };
     addPoint(pt, pressureOf(e), 0, true);
@@ -176,6 +214,11 @@
   function onPointerMove(e) {
     moveCursor(e);
     if (erasing && e.pointerId === erasing.pointerId) { eraserMove(e); return; }
+    if (moving && e.pointerId === moving.pointerId) {
+      const pt = toArtboard(e);
+      moving.dx = pt.x - moving.start.x; moving.dy = pt.y - moving.start.y; dirty = true;
+      return;
+    }
     if (!drawing || e.pointerId !== drawing.pointerId) return;
     const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
     for (const ev of (evs.length ? evs : [e])) {
@@ -185,24 +228,39 @@
 
   function onPointerUp(e) {
     if (erasing && e.pointerId === erasing.pointerId) { eraserEnd(); return; }
+    if (moving && e.pointerId === moving.pointerId) { moveEnd(); return; }
     if (!drawing || e.pointerId !== drawing.pointerId) return;
     drawing = null;
     dirty = true;
     updateStatus(); renderLayers();
   }
 
+  // Strokes are immutable (history shares them), so a move makes translated copies.
+  function moveEnd() {
+    const { layerId, dx, dy } = moving;
+    moving = null; dirty = true;
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
+    beforeChange();
+    const layer = findLayer(layerId);
+    layer.strokes = layer.strokes.map((st) => Object.assign({}, st, {
+      id: nextId(), _s: null, _n: 0, _bb: null, _bbN: -1,
+      points: st.points.map((p) => ({ x: p.x + dx, y: p.y + dy, p: p.p, t: p.t })),
+    }));
+  }
+
   canvas.addEventListener('pointerdown', onPointerDown);
   canvas.addEventListener('pointermove', onPointerMove);
   canvas.addEventListener('pointerup', onPointerUp);
   canvas.addEventListener('pointercancel', onPointerUp);
-  canvas.addEventListener('pointerleave', () => { $('cursorRing').style.display = 'none'; });
+  canvas.addEventListener('pointerleave', () => { ring.style.display = 'none'; });
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
   const ring = $('cursorRing');
   function moveCursor(e) {
+    if (state.tool === 'move') { ring.style.display = 'none'; canvas.style.cursor = 'move'; return; }
+    canvas.style.cursor = 'none';
     const sr = stage.getBoundingClientRect();
-    const size = state.tool === 'eraser' ? state.eraserSize * 2
-      : (state.brushSettings[state.tool] ? state.brushSettings[state.tool].size : 8);
+    const size = state.tool === 'eraser' ? eraserRadius() * 2 : fromPercent(state.brush, state.pct[state.brush]).size;
     const d = Math.max(6, size * viewScale);
     ring.style.display = 'block';
     ring.style.width = ring.style.height = d + 'px';
@@ -242,12 +300,12 @@
   function eraseAt(pt) {
     const layer = activeLayer();
     const before = layer.strokes.length;
-    layer.strokes = layer.strokes.filter((st) => !hitStroke(st, pt.x, pt.y, state.eraserSize));
+    layer.strokes = layer.strokes.filter((st) => !hitStroke(st, pt.x, pt.y, eraserRadius()));
     if (layer.strokes.length !== before) { erasing.removed += before - layer.strokes.length; dirty = true; updateStatus(); }
   }
   function eraserStart(e, pt) {
     const layer = activeLayer();
-    if (!layer || layer.type !== 'draw') { toast('Select a drawing layer to erase'); return; }
+    if (!layer || layer.type !== 'draw') { toast('Pick a drawing layer to erase'); return; }
     erasing = { pointerId: e.pointerId, snap: snapshot(), removed: 0, last: pt };
     eraseAt(pt);
   }
@@ -256,7 +314,7 @@
     for (const ev of (evs.length ? evs : [e])) {
       const pt = toArtboard(ev), last = erasing.last;
       // sample the drag segment so fast swipes don't skip thin strokes
-      const steps = Math.max(1, Math.ceil(Math.hypot(pt.x - last.x, pt.y - last.y) / (state.eraserSize * 0.5)));
+      const steps = Math.max(1, Math.ceil(Math.hypot(pt.x - last.x, pt.y - last.y) / (eraserRadius() * 0.5)));
       for (let k = 1; k <= steps; k++) eraseAt({ x: last.x + (pt.x - last.x) * k / steps, y: last.y + (pt.y - last.y) * k / steps });
       erasing.last = pt;
     }
@@ -293,11 +351,11 @@
   }
   function beforeChange() { pushUndo(snapshot()); }
   function undo() {
-    if (drawing || erasing || !undoStack.length) return;
+    if (drawing || erasing || moving || !undoStack.length) return;
     redoStack.push(snapshot()); restore(undoStack.pop()); syncHistoryButtons();
   }
   function redo() {
-    if (drawing || erasing || !redoStack.length) return;
+    if (drawing || erasing || moving || !redoStack.length) return;
     undoStack.push(snapshot()); restore(redoStack.pop()); syncHistoryButtons();
   }
   function resetHistory() { undoStack.length = 0; redoStack.length = 0; syncHistoryButtons(); }
@@ -310,67 +368,150 @@
 
   $('btnClear').addEventListener('click', () => {
     const layer = activeLayer();
-    if (!layer || layer.type !== 'draw') { toast('Select a drawing layer to clear'); return; }
+    if (!layer || layer.type !== 'draw') { toast('Pick a drawing layer to clear'); return; }
     if (!layer.strokes.length) return;
     beforeChange();
     layer.strokes = [];
     dirty = true; renderLayers(); updateStatus();
-    toast('Layer cleared — Ctrl+Z to undo');
+    toast('Layer cleared. Undo brings it back');
   });
 
-  /* -------------------------------------------------------------- brush UI */
-  const ctl = {
-    color: $('ctlColor'), size: $('ctlSize'), opacity: $('ctlOpacity'),
-    speed: $('ctlSpeed'), amp: $('ctlAmp'), freq: $('ctlFreq'),
-  };
-  const fmt = { size: (v) => v, opacity: (v) => Math.round(v * 100) + '%', speed: (v) => (+v).toFixed(2), amp: (v) => (+v).toFixed(1), freq: (v) => (+v).toFixed(2) };
+  /* ----------------------------------------------------------------- sheets */
+  const SHEETS = ['sheetBrushes', 'sheetLayers', 'sheetShare'];
+  function openSheet(id) {
+    for (const s of SHEETS) $(s).hidden = s !== id;
+    if (id === 'sheetLayers') renderLayers();
+    if (id === 'sheetBrushes') syncBrushSheet();
+    syncDock();
+  }
+  function closeSheets() { for (const s of SHEETS) $(s).hidden = true; syncDock(); }
+  const sheetOpen = () => SHEETS.some((s) => !$(s).hidden);
+  document.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', closeSheets));
 
-  function showOutput(input, text) {
-    const out = input.parentElement.querySelector('output');
-    if (out) out.textContent = text;
+  /* ------------------------------------------------------------------ tools */
+  function setTool(tool) {
+    state.tool = tool;
+    syncDock(); syncVSlider();
+  }
+  function setBrush(brush) {
+    if (!BRUSHES[brush]) return;
+    state.brush = brush;
+    state.tool = 'pencil';
+    syncDock(); syncVSlider(); syncBrushSheet();
+  }
+  function syncDock() {
+    $('toolPencil').classList.toggle('active', state.tool === 'pencil');
+    $('toolEraser').classList.toggle('active', state.tool === 'eraser');
+    $('toolMove').classList.toggle('active', state.tool === 'move');
+    $('toolLayers').classList.toggle('active', !$('sheetLayers').hidden);
+    $('toolShare').classList.toggle('active', !$('sheetShare').hidden);
+  }
+  $('toolPencil').addEventListener('click', () => {
+    if (state.tool === 'pencil') { $('sheetBrushes').hidden ? openSheet('sheetBrushes') : closeSheets(); }
+    else { setTool('pencil'); toast(BRUSHES[state.brush].label + '. Tap again for brushes'); }
+  });
+  $('toolEraser').addEventListener('click', () => { setTool('eraser'); closeSheets(); });
+  $('toolMove').addEventListener('click', () => { setTool('move'); closeSheets(); toast('Drag to move the current layer'); });
+  $('toolLayers').addEventListener('click', () => ($('sheetLayers').hidden ? openSheet('sheetLayers') : closeSheets()));
+  $('toolShare').addEventListener('click', () => ($('sheetShare').hidden ? openSheet('sheetShare') : closeSheets()));
+
+  /* ------------------------------------------------- vertical wiggle slider */
+  // Controls the brush's Wiggle (pencil/move) or the eraser size (eraser).
+  const vs = $('vslider'), vsTrack = $('vsTrack');
+  function vsValue() { return state.tool === 'eraser' ? state.eraserPct : state.pct[state.brush].wiggle; }
+  function setVsValue(v) {
+    v = Math.max(0, Math.min(100, Math.round(v)));
+    if (state.tool === 'eraser') state.eraserPct = v;
+    else state.pct[state.brush].wiggle = v;
+    syncVSlider();
+  }
+  function syncVSlider() {
+    const v = vsValue();
+    $('vsVal').textContent = v + '%';
+    $('vsFill').style.height = v + '%';
+    $('vsHandle').style.bottom = v + '%';
+    vs.setAttribute('aria-valuenow', v);
+    vs.setAttribute('aria-label', state.tool === 'eraser' ? 'Eraser size' : 'Wiggle');
+    vs.title = state.tool === 'eraser' ? 'Eraser size' : 'Wiggle: how far the line boils';
+  }
+  let vsDrag = null;
+  function vsFromEvent(e) {
+    const r = vsTrack.getBoundingClientRect();
+    setVsValue((r.bottom - e.clientY) / r.height * 100);
+  }
+  vs.addEventListener('pointerdown', (e) => {
+    vsDrag = e.pointerId;
+    try { vs.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ }
+    vsFromEvent(e);
+  });
+  vs.addEventListener('pointermove', (e) => { if (vsDrag === e.pointerId) vsFromEvent(e); });
+  vs.addEventListener('pointerup', () => { vsDrag = null; });
+  vs.addEventListener('pointercancel', () => { vsDrag = null; });
+  vs.addEventListener('keydown', (e) => {
+    const step = { ArrowUp: 1, ArrowRight: 1, ArrowDown: -1, ArrowLeft: -1, PageUp: 10, PageDown: -10 }[e.key];
+    if (step) { e.preventDefault(); e.stopPropagation(); setVsValue(vsValue() + step); }
+  });
+
+  /* ----------------------------------------------------------- brush sheet */
+  const cardsEl = $('brushCards');
+  const previews = {};
+  for (const b of BRUSH_ORDER) {
+    const btn = document.createElement('button');
+    btn.className = 'card'; btn.dataset.brush = b;
+    btn.setAttribute('aria-label', BRUSHES[b].label);
+    const cv = document.createElement('canvas'); cv.width = cv.height = 320;
+    const label = document.createElement('span'); label.textContent = BRUSHES[b].label;
+    btn.append(cv, label);
+    btn.addEventListener('click', () => setBrush(b));
+    cardsEl.appendChild(btn);
+    // a gentle wave drawn in "artboard" units, previewed at half scale
+    const pts = [];
+    for (let i = 0; i <= 120; i++) { const t = i / 120; pts.push({ x: 60 + 520 * t, y: 320 + Math.sin(t * Math.PI * 2) * 48, p: 0.5, t: i * 8 }); }
+    previews[b] = { cv, g: cv.getContext('2d'), stroke: { brush: b, seed: 900 + BRUSH_ORDER.indexOf(b) * 77, points: pts } };
+  }
+  function renderPreviews() {
+    const L = state.loop, u = (((state.time % L) + L) % L) / L;
+    for (const b of BRUSH_ORDER) {
+      const pv = previews[b], p = state.pct[b], m = fromPercent(b, p);
+      Object.assign(pv.stroke, m, { color: state.ink, opacity: p.opacity / 100 });
+      const g = pv.g;
+      g.setTransform(1, 0, 0, 1, 0, 0);
+      g.clearRect(0, 0, 320, 320);
+      g.setTransform(0.5, 0, 0, 0.5, 0, 0);
+      BRUSHES[b].render(g, pv.stroke, { L, u, t: state.time });
+      DMBrushes.haze.flush(g);
+    }
   }
 
-  function syncBrushPanel() {
-    const isEraser = state.tool === 'eraser';
-    $('brushControls').hidden = isEraser;
-    $('eraserControls').hidden = !isEraser;
-    $('brushTitle').textContent = isEraser ? 'Eraser' : BRUSHES[state.tool].label;
-    if (isEraser) {
-      $('ctlEraser').value = state.eraserSize; showOutput($('ctlEraser'), state.eraserSize);
-      return;
+  const sliders = { speed: 'Speed', thickness: 'Thickness', opacity: 'Opacity', detail: 'Detail' };
+  const sliderEl = (k) => $('ctl' + sliders[k]);
+  function paintRange(el) { el.style.setProperty('--p', ((el.value - el.min) / (el.max - el.min) * 100) + '%'); }
+  function syncBrushSheet() {
+    const p = state.pct[state.brush];
+    for (const k in sliders) {
+      const el = sliderEl(k);
+      el.value = p[k]; paintRange(el);
+      $('out' + sliders[k]).textContent = p[k] + '%';
     }
-    const s = state.brushSettings[state.tool];
-    for (const k in ctl) {
-      ctl[k].value = s[k];
-      if (fmt[k]) showOutput(ctl[k], fmt[k](s[k]));
-    }
+    cardsEl.querySelectorAll('.card').forEach((c) => c.classList.toggle('selected', c.dataset.brush === state.brush));
   }
-
-  for (const k in ctl) {
-    ctl[k].addEventListener('input', () => {
-      const s = state.brushSettings[state.tool];
-      if (!s) return;
-      s[k] = k === 'color' ? ctl[k].value : parseFloat(ctl[k].value);
-      if (fmt[k]) showOutput(ctl[k], fmt[k](s[k]));
+  for (const k in sliders) {
+    sliderEl(k).addEventListener('input', (e) => {
+      state.pct[state.brush][k] = +e.target.value;
+      paintRange(e.target);
+      $('out' + sliders[k]).textContent = e.target.value + '%';
     });
   }
-  $('ctlEraser').addEventListener('input', (e) => {
-    state.eraserSize = +e.target.value; showOutput(e.target, state.eraserSize);
-  });
-
-  function setTool(tool) {
-    if (tool !== 'eraser' && !BRUSHES[tool]) return;
-    state.tool = tool;
-    document.querySelectorAll('#brushTools .tool').forEach((b) => b.classList.toggle('active', b.dataset.tool === tool));
-    syncBrushPanel();
-  }
-  document.querySelectorAll('#brushTools .tool').forEach((b) => {
-    if (b.dataset.tool !== 'eraser' && !BRUSHES[b.dataset.tool]) b.disabled = true;
-    b.addEventListener('click', () => setTool(b.dataset.tool));
+  $('btnResetBrush').addEventListener('click', () => {
+    state.pct[state.brush] = defaultPct(state.brush);
+    syncBrushSheet(); syncVSlider();
+    toast(BRUSHES[state.brush].label + ' reset');
   });
 
   /* ---------------------------------------------------------------- layers */
   const layerList = $('layerList');
+  const EYE_ON = '<svg viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+  const EYE_OFF = '<svg viewBox="0 0 24 24"><path d="M3 3l18 18"/><path d="M10.6 5.1A9.6 9.6 0 0112 5c6 0 10 7 10 7a17 17 0 01-3.2 3.9M6.6 6.6C3.8 8.4 2 12 2 12s4 7 10 7a9.4 9.4 0 004.6-1.2"/></svg>';
 
   function renderLayers() {
     layerList.textContent = '';
@@ -382,7 +523,8 @@
       li.dataset.id = l.id;
       const eye = document.createElement('button');
       eye.className = 'eye'; eye.title = l.visible ? 'Hide layer' : 'Show layer';
-      eye.textContent = l.visible ? '◉' : '○';
+      eye.setAttribute('aria-label', eye.title);
+      eye.innerHTML = l.visible ? EYE_ON : EYE_OFF;
       eye.addEventListener('click', (e) => {
         e.stopPropagation();
         beforeChange();
@@ -391,11 +533,11 @@
       });
       const name = document.createElement('span');
       name.className = 'name';
-      name.textContent = (l.type === 'image' ? '🖼 ' : '') + l.name;
+      name.textContent = (l.type === 'image' ? 'Image · ' : '') + l.name;
       name.title = 'Double-click to rename';
       const count = document.createElement('span');
       count.className = 'count';
-      count.textContent = l.type === 'image' ? 'image' : l.strokes.length;
+      count.textContent = l.type === 'image' ? '' : l.strokes.length + (l.strokes.length === 1 ? ' stroke' : ' strokes');
       li.append(eye, name, count);
       li.addEventListener('click', () => { state.activeLayerId = l.id; syncActiveLayer(); });
       layerList.appendChild(li);
@@ -420,8 +562,7 @@
     const layer = findLayer(id);
     const input = document.createElement('input');
     input.value = layer.name; input.className = 'rename';
-    const nameEl = li.querySelector('.name');
-    nameEl.replaceWith(input);
+    li.querySelector('.name').replaceWith(input);
     input.focus(); input.select();
     let done = false;
     const finish = (commit) => {
@@ -448,8 +589,7 @@
     beforeChange();
     const idx = state.layers.findIndex((x) => x.id === state.activeLayerId);
     state.layers.splice(idx, 1);
-    const next = state.layers[Math.min(idx, state.layers.length - 1)];
-    state.activeLayerId = next.id;
+    state.activeLayerId = state.layers[Math.min(idx, state.layers.length - 1)].id;
     dirty = true; renderLayers(); updateStatus();
   }
   function moveLayer(dir) {
@@ -476,9 +616,9 @@
         l.image = img; l.imageSrc = reader.result;
         state.layers.unshift(l); // background = bottom of the stack
         dirty = true; renderLayers();
-        toast('Image added as background layer');
+        toast('Image added as the background layer');
       };
-      img.onerror = () => toast('Could not read that image');
+      img.onerror = () => toast('That file could not be read as an image');
       img.src = reader.result;
     };
     reader.readAsDataURL(file);
@@ -493,10 +633,10 @@
   const r2 = (v) => Math.round(v * 100) / 100;
   function serialize() {
     return {
-      app: 'drawimate', version: 1,
+      app: 'drawimate', version: 2,
       width: state.width, height: state.height,
-      background: state.background, loop: state.loop,
-      brushSettings: state.brushSettings,
+      background: state.background, ink: state.ink, loop: state.loop,
+      brushPct: state.pct, eraserPct: state.eraserPct,
       activeLayer: state.layers.findIndex((l) => l.id === state.activeLayerId),
       layers: state.layers.map((l) => ({
         name: l.name, type: l.type, visible: l.visible,
@@ -515,7 +655,7 @@
   const num = (v, d, lo, hi) => { v = Number(v); return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d; };
 
   function deserialize(data) {
-    if (!data || data.app !== 'drawimate' || !Array.isArray(data.layers)) throw new Error('Not a Drawimate project');
+    if (!data || data.app !== 'drawimate' || !Array.isArray(data.layers)) throw new Error('this is not a Drawimate project');
     const layers = [];
     for (const L of data.layers) {
       const l = makeLayer(String(L.name || 'Layer').slice(0, 40), L.type === 'image' ? 'image' : 'draw');
@@ -533,8 +673,8 @@
           l.strokes.push({
             id: nextId(), brush: S.brush,
             color: isHex(S.color) ? S.color : d.color,
-            size: num(S.size, d.size, 0.5, 200), opacity: num(S.opacity, d.opacity, 0, 1),
-            speed: num(S.speed, d.speed, 0, 10), amp: num(S.amp, d.amp, 0, 200), freq: num(S.freq, d.freq, 0, 20),
+            size: num(S.size, d.size, 0.3, 300), opacity: num(S.opacity, d.opacity, 0, 1),
+            speed: num(S.speed, d.speed, 0, 10), amp: num(S.amp, d.amp, 0, 300), freq: num(S.freq, d.freq, 0, 20),
             seed: num(S.seed, 1, 0, 1e9) | 0,
             points: S.points.map((p) => ({ x: +p[0] || 0, y: +p[1] || 0, p: num(p[2], 0.5, 0, 1), t: +p[3] || 0 })),
           });
@@ -544,25 +684,25 @@
     }
     if (!layers.length) layers.push(makeLayer('Layer 1'));
     state.layers = layers;
-    const ai = num(data.activeLayer, layers.length - 1, 0, layers.length - 1) | 0;
-    state.activeLayerId = layers[ai].id;
-    state.width = num(data.width, 1280, 64, 4096) | 0;
-    state.height = num(data.height, 720, 64, 4096) | 0;
+    state.activeLayerId = layers[num(data.activeLayer, layers.length - 1, 0, layers.length - 1) | 0].id;
+    state.width = num(data.width, 1320, 64, 4096) | 0;
+    state.height = num(data.height, 1320, 64, 4096) | 0;
     if (isHex(data.background)) state.background = data.background;
+    if (isHex(data.ink)) state.ink = data.ink;
     state.loop = num(data.loop, 4, 2, 10) | 0;
-    if (data.brushSettings) {
-      for (const k in BRUSHES) {
-        const src = data.brushSettings[k], dst = state.brushSettings[k];
+    state.eraserPct = num(data.eraserPct, state.eraserPct, 0, 100) | 0;
+    if (data.brushPct) {
+      for (const k of BRUSH_ORDER) {
+        const src = data.brushPct[k];
         if (!src) continue;
-        if (isHex(src.color)) dst.color = src.color;
-        for (const f of ['size', 'opacity', 'speed', 'amp', 'freq']) if (Number.isFinite(+src[f])) dst[f] = +src[f];
+        for (const f of ['thickness', 'speed', 'wiggle', 'detail', 'opacity']) {
+          if (Number.isFinite(+src[f])) state.pct[k][f] = num(src[f], state.pct[k][f], 0, 100) | 0;
+        }
       }
     }
     layerCounter = layers.length;
     resetHistory();
-    $('ctlBg').value = state.background;
-    syncLoop(); syncCanvasSize(); syncBrushPanel();
-    layoutCanvas(); renderLayers(); updateStatus();
+    syncAll(); layoutCanvas(); renderLayers(); updateStatus();
   }
 
   /* Save a file. Inside a claude.ai artifact the frame blocks direct
@@ -585,8 +725,8 @@
     download(new Blob([JSON.stringify(serialize())], { type: 'application/json' }), 'drawimate-project.json', 'Project saved');
   }
   function loadProjectFile(file) {
-    file.text().then((txt) => { deserialize(JSON.parse(txt)); toast('Project loaded'); })
-      .catch((err) => toast('Could not load: ' + err.message));
+    file.text().then((txt) => { deserialize(JSON.parse(txt)); closeSheets(); toast('Project opened'); })
+      .catch((err) => toast('Could not open: ' + err.message));
   }
   $('btnSave').addEventListener('click', saveProject);
   $('btnLoad').addEventListener('click', () => $('fileProject').click());
@@ -595,7 +735,7 @@
     if (f) loadProjectFile(f);
   });
 
-  // Drag & drop: images become background layers, .json files load.
+  // Drag & drop: images become background layers, .json files open.
   stage.addEventListener('dragover', (e) => e.preventDefault());
   stage.addEventListener('drop', (e) => {
     e.preventDefault();
@@ -604,28 +744,6 @@
     if (f.type.startsWith('image/')) importImageFile(f);
     else if (f.name.endsWith('.json') || f.type === 'application/json') loadProjectFile(f);
   });
-
-  /* ------------------------------------------------------------- transport */
-  function setPlaying(p) {
-    state.playing = p;
-    $('btnPlay').classList.toggle('paused', !p);
-    $('btnPlay').querySelector('span').textContent = p ? 'Pause' : 'Play';
-    dirty = true;
-  }
-  $('btnPlay').addEventListener('click', () => setPlaying(!state.playing));
-
-  /* ------------------------------------------------------------ canvas card */
-  $('ctlBg').value = state.background;
-  $('ctlBg').addEventListener('input', (e) => { state.background = e.target.value; dirty = true; });
-  function syncLoop() { $('ctlLoop').value = state.loop; showOutput($('ctlLoop'), state.loop + 's'); }
-  $('ctlLoop').addEventListener('input', (e) => { state.loop = +e.target.value; syncLoop(); dirty = true; });
-  syncLoop();
-  function syncCanvasSize() { $('ctlCanvasSize').value = state.width + 'x' + state.height; }
-  $('ctlCanvasSize').addEventListener('change', (e) => {
-    const [w, h] = e.target.value.split('x').map(Number);
-    state.width = w; state.height = h; layoutCanvas();
-  });
-  syncCanvasSize();
 
   /* ----------------------------------------------------------------- export */
   // Exports render offscreen at artboard resolution, at exact loop times
@@ -639,7 +757,7 @@
     return c;
   }
   function startExport(label) {
-    if (drawing || erasing) return null;
+    if (drawing || erasing || moving) return null;
     exporting = { cancelled: false };
     suspendLive = true;
     $('modalText').textContent = label;
@@ -700,7 +818,7 @@
           renderScene(g, i / fps);
           if (track.requestFrame) track.requestFrame();
           sent = due;
-          setProgress(sent / total, `Recording ${(i / fps).toFixed(1)}s / ${L}s — keep this tab visible`);
+          setProgress(sent / total, `Recording ${(i / fps).toFixed(1)}s of ${L}s. Keep this tab visible`);
         }
         if (sent >= total && performance.now() - t0 >= L * 1000) return resolve();
         requestAnimationFrame(tick);
@@ -730,7 +848,7 @@
         renderScene(g, i / fps);
         const blob = await new Promise((res) => c.toBlob(res, 'image/png'));
         zip.add(`frame_${String(i).padStart(Math.max(4, digits), '0')}.png`, new Uint8Array(await blob.arrayBuffer()));
-        setProgress((i + 1) / total, `Rendering frame ${i + 1} / ${total}`);
+        setProgress((i + 1) / total, `Rendering frame ${i + 1} of ${total}`);
       }
     } catch (err) {
       endExport(); toast('Export failed: ' + err.message); return;
@@ -743,40 +861,76 @@
   $('btnWebm').addEventListener('click', exportWebm);
   $('btnZip').addEventListener('click', exportZip);
 
+  /* ------------------------------------------------------------- transport */
+  function setPlaying(p) {
+    state.playing = p;
+    $('btnPlay').classList.toggle('paused', !p);
+    $('btnPlay').setAttribute('aria-label', p ? 'Pause animation' : 'Play animation');
+    dirty = true;
+  }
+  $('btnPlay').addEventListener('click', () => setPlaying(!state.playing));
+
+  /* ------------------------------------------------------ colours & canvas */
+  function syncSwatches() {
+    $('ctlInk').value = state.ink; $('ctlInk').nextElementSibling.style.setProperty('--c', state.ink);
+    $('ctlBg').value = state.background; $('ctlBg').nextElementSibling.style.setProperty('--c', state.background);
+  }
+  $('ctlInk').addEventListener('input', (e) => { state.ink = e.target.value; syncSwatches(); });
+  $('ctlBg').addEventListener('input', (e) => { state.background = e.target.value; syncSwatches(); dirty = true; });
+  function syncLoop() { $('ctlLoop').value = state.loop; paintRange($('ctlLoop')); $('outLoop').textContent = state.loop + 's'; }
+  $('ctlLoop').addEventListener('input', (e) => { state.loop = +e.target.value; syncLoop(); dirty = true; });
+  function syncCanvasSize() {
+    const v = state.width + 'x' + state.height, sel = $('ctlCanvasSize');
+    if (![...sel.options].some((o) => o.value === v)) {
+      const o = document.createElement('option'); o.value = v; o.textContent = state.width + ' × ' + state.height; sel.appendChild(o);
+    }
+    sel.value = v;
+  }
+  $('ctlCanvasSize').addEventListener('change', (e) => {
+    const [w, h] = e.target.value.split('x').map(Number);
+    state.width = w; state.height = h; layoutCanvas();
+  });
+
+  function syncAll() { syncSwatches(); syncLoop(); syncCanvasSize(); syncBrushSheet(); syncVSlider(); syncDock(); }
+
   /* ---------------------------------------------------------------- misc UI */
   let toastTimer = 0;
   function toast(msg) {
     const el = $('toast');
     el.textContent = msg; el.classList.add('show');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => el.classList.remove('show'), 1800);
+    toastTimer = setTimeout(() => el.classList.remove('show'), 2000);
   }
   function updateStatus() {
     const n = strokeCount();
-    $('statStrokes').textContent = n + (n === 1 ? ' stroke' : ' strokes');
+    $('statFps').dataset.strokes = n;
   }
 
   window.addEventListener('keydown', (e) => {
     if (exporting) return;
     if ((e.target.tagName === 'INPUT' && e.target.type !== 'range' && e.target.type !== 'color') || e.target.tagName === 'SELECT') return;
     const mod = e.ctrlKey || e.metaKey;
-    if (!mod && e.key >= '1' && e.key <= '5') { setTool(['scribble', 'flow', 'particle', 'smoke', 'pulse'][+e.key - 1]); }
-    else if (!mod && (e.key === 'e' || e.key === 'E')) setTool('eraser');
+    const k = e.key.toLowerCase();
+    if (e.key === 'Escape' && sheetOpen()) { closeSheets(); return; }
+    if (!mod && e.key >= '1' && e.key <= '5') setBrush(BRUSH_ORDER[+e.key - 1]);
+    else if (!mod && k === 'b') setTool('pencil');
+    else if (!mod && k === 'e') setTool('eraser');
+    else if (!mod && k === 'm') setTool('move');
+    else if (!mod && k === 'l') ($('sheetLayers').hidden ? openSheet('sheetLayers') : closeSheets());
     else if (!mod && e.code === 'Space') { e.preventDefault(); setPlaying(!state.playing); }
-    else if (mod && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); e.shiftKey ? redo() : undo(); }
-    else if (mod && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); redo(); }
-    else if (mod && (e.key === 's' || e.key === 'S')) { e.preventDefault(); saveProject(); }
-    else if (mod && (e.key === 'o' || e.key === 'O')) { e.preventDefault(); $('fileProject').click(); }
+    else if (mod && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
+    else if (mod && k === 'y') { e.preventDefault(); redo(); }
+    else if (mod && k === 's') { e.preventDefault(); saveProject(); }
+    else if (mod && k === 'o') { e.preventDefault(); $('fileProject').click(); }
     else if (!mod && (e.key === '[' || e.key === ']')) {
-      const d = e.key === ']' ? 1 : -1;
-      if (state.tool === 'eraser') { state.eraserSize = Math.max(4, Math.min(80, state.eraserSize + d * 2)); }
-      else { const s = state.brushSettings[state.tool]; s.size = Math.max(1, Math.min(80, s.size + d)); }
-      syncBrushPanel();
+      const d = e.key === ']' ? 2 : -2;
+      if (state.tool === 'eraser') setVsValue(state.eraserPct + d);
+      else { const p = state.pct[state.brush]; p.thickness = Math.max(0, Math.min(100, p.thickness + d)); syncBrushSheet(); }
     }
   });
 
   /* ------------------------------------------------------------------- boot */
-  setTool('scribble');
+  syncAll();
   setPlaying(true);
   renderLayers();
   syncHistoryButtons();
@@ -784,6 +938,10 @@
   layoutCanvas();
   requestAnimationFrame(frame);
 
-  // Exposed for debugging and automated tests.
-  window.Drawimate = { state, renderScene, exportWebm, exportZip, setTool, setPlaying, undo, redo, serialize, deserialize, addLayer, deleteLayer, moveLayer, get fps() { return fps; }, get quality() { return quality; } };
+  // Exposed for debugging, automated tests and embedding.
+  window.Drawimate = {
+    state, renderScene, exportWebm, exportZip, setTool, setBrush, setPlaying,
+    undo, redo, serialize, deserialize, addLayer, deleteLayer, moveLayer, openSheet, closeSheets,
+    get fps() { return fps; }, get quality() { return quality; },
+  };
 })();
