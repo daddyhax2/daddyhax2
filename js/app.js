@@ -36,13 +36,14 @@
   const ctx = canvas.getContext('2d');
   const stage = $('stage');
   let viewScale = 1, dpr = 1;
+  let quality = 1; // adaptive resolution factor (drops on slow devices)
 
   function layoutCanvas() {
     const pad = 28;
     const r = stage.getBoundingClientRect();
     viewScale = Math.min((r.width - pad * 2) / state.width, (r.height - pad * 2) / state.height);
     viewScale = Math.max(0.05, viewScale);
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    dpr = Math.min(window.devicePixelRatio || 1, 2) * quality;
     const cssW = Math.round(state.width * viewScale), cssH = Math.round(state.height * viewScale);
     canvas.style.width = cssW + 'px';
     canvas.style.height = cssH + 'px';
@@ -76,8 +77,11 @@
       if (layer.type === 'image') { drawImageLayer(c, layer, state.width, state.height); continue; }
       for (const st of layer.strokes) {
         const b = BRUSHES[st.brush];
-        if (b && st.points.length) b.render(c, st, f);
+        if (!b || !st.points.length) continue;
+        if (st.brush !== 'smoke') DMBrushes.haze.flush(c); // keep stacking order
+        b.render(c, st, f);
       }
+      DMBrushes.haze.flush(c);
     }
     c.globalAlpha = 1;
   }
@@ -101,8 +105,19 @@
     if (fpsTime >= 0.5) {
       fps = fpsFrames / fpsTime; fpsFrames = 0; fpsTime = 0;
       $('statFps').textContent = Math.round(fps) + ' fps';
+      adaptQuality();
     }
     requestAnimationFrame(frame);
+  }
+
+  /* Adaptive resolution: if playback can't keep up, render the live view at a
+   * lower pixel density (exports are unaffected); recover when there's headroom. */
+  let slowTicks = 0, fastTicks = 0;
+  function adaptQuality() {
+    if (!state.playing || suspendLive || document.hidden) { slowTicks = fastTicks = 0; return; }
+    if (fps < 50) { fastTicks = 0; if (++slowTicks >= 2 && quality > 0.5) { quality = Math.max(0.5, quality - 0.15); slowTicks = 0; layoutCanvas(); } }
+    else if (fps > 58) { slowTicks = 0; if (++fastTicks >= 10 && quality < 1) { quality = Math.min(1, quality + 0.1); fastTicks = 0; layoutCanvas(); } }
+    else slowTicks = fastTicks = 0;
   }
 
   /* ------------------------------------------------------------------ input */
@@ -310,5 +325,5 @@
   requestAnimationFrame(frame);
 
   // Exposed for debugging and automated tests.
-  window.Drawimate = { state, renderScene, setTool, setPlaying, get fps() { return fps; } };
+  window.Drawimate = { state, renderScene, setTool, setPlaying, get fps() { return fps; }, get quality() { return quality; } };
 })();
