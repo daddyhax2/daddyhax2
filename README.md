@@ -69,3 +69,9 @@ js/app.js        state, input, render loop, layers, history, save/load, export
 - Smoke puffs render into a half-resolution "haze" buffer that only redraws its dirty area.
 - If playback drops below ~50 fps, the live view lowers its pixel density automatically and
   restores it when there is headroom. Exports always render at full resolution.
+
+## Example
+
+`examples/finn.json` is a sample project: an animated drawing of Finn on a hill, with
+Scribble outlines and fills, a Flow grass edge, cloud puffs and Particle sparkles. Load it
+with **Open**. `examples/make_finn.py` generates it from shapes (`python3 examples/make_finn.py`).
